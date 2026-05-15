@@ -311,15 +311,13 @@ body {
 .input-wrap { flex: 1; position: relative; display: flex; align-items: flex-end; }
 .msg-input {
   width: 100%; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 12px; padding: 11px 44px 11px 16px;
+  border-radius: 12px; padding: 11px 16px 11px 16px;
   color: var(--text); font-family: 'Sora', sans-serif; font-size: 13.5px;
   outline: none; transition: border-color .2s, box-shadow .2s; resize: none;
   max-height: 120px; overflow-y: auto; line-height: 1.4;
 }
 .msg-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .msg-input::placeholder { color: var(--text-dim); }
-.emoji-btn { position: absolute; right: 12px; bottom: 12px; background: none; border: none; cursor: pointer; font-size: 17px; line-height: 1; opacity: 0.5; transition: opacity .15s; }
-.emoji-btn:hover { opacity: 0.9; }
 .input-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .send-btn {
   width: 44px; height: 44px; border-radius: 12px;
@@ -339,6 +337,7 @@ body {
 }
 .voice-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 .voice-btn.recording { background: var(--danger); color: #fff; border-color: var(--danger); animation: pulse 1s infinite; }
+.voice-btn svg { width: 20px; height: 20px; }
 @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.4} }
 .attach-btn {
   width: 44px; height: 44px; border-radius: 12px;
@@ -623,7 +622,29 @@ body {
 .back-btn{display:none}
 #file-input{display:none}
 
-/* Input field inline in settings */
+/* Global search results */
+#global-search-results {
+  background: var(--surface); max-height: 320px; overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+.gsearch-section-title {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--text-dim); padding: 8px 16px 4px;
+}
+.gsearch-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 16px;
+  cursor: pointer; transition: background .12s;
+}
+.gsearch-item:hover { background: var(--panel); }
+.gsearch-item-av {
+  width: 36px; height: 36px; border-radius: 11px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 600; flex-shrink: 0;
+}
+.gsearch-item-info { flex: 1; min-width: 0; }
+.gsearch-item-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gsearch-item-sub { font-size: 11px; color: var(--text-mid); font-family: 'JetBrains Mono', monospace; }
+.gsearch-no-results { padding: 16px; font-size: 13px; color: var(--text-dim); text-align: center; }
 .settings-input-inline {
   width: 130px; margin: 0 !important; padding: 6px 10px !important;
   font-size: 12px !important; margin-bottom: 0 !important;
@@ -709,8 +730,9 @@ body {
     </div>
     <div class="search-wrap">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path stroke-linecap="round" d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="search-input" placeholder="Поиск..." oninput="filterChats(this.value)">
+      <input type="text" id="search-input" placeholder="Поиск чатов, каналов, людей..." oninput="handleSearchInput(this.value)">
     </div>
+    <div id="global-search-results" style="display:none;border-top:1px solid var(--border)"></div>
   </div>
   <div class="chat-list" id="chat-list-root"></div>
   <div class="sidebar-footer">
@@ -796,7 +818,6 @@ body {
         </button>
         <div class="input-wrap">
           <textarea class="msg-input" id="msg-input" placeholder="Написать сообщение..." rows="1" onkeydown="handleInputKey(event)" oninput="autoResize(this)"></textarea>
-          <button class="emoji-btn" onclick="toggleEmojiPicker(event)">😊</button>
         </div>
         <div class="input-actions">
           <button class="voice-btn" id="voice-btn" onclick="toggleVoiceRecord()">
@@ -1237,6 +1258,12 @@ function setAuthLoading(on){
 
 async function loginSuccess(user){
   me = user;
+  // Добавляем аккаунт в список сохранённых
+  let saved = LS.get('kvit_saved_users') || [];
+  if(!saved.find(u=>u.username===user.username)){
+    saved.push({username:user.username, name:user.name, avColor:user.avColor});
+    LS.set('kvit_saved_users', saved);
+  }
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
   await loadMyChats();
@@ -1329,6 +1356,127 @@ function renderUI(){
 }
 
 function filterChats(q){ renderChatList(q); }
+
+let globalSearchTimer = null;
+function handleSearchInput(q){
+  const resultsEl = document.getElementById('global-search-results');
+  filterChats(q);
+  if(!q || q.length < 2){
+    resultsEl.style.display = 'none';
+    return;
+  }
+  // Debounce
+  clearTimeout(globalSearchTimer);
+  globalSearchTimer = setTimeout(()=>doGlobalSearch(q), 350);
+}
+
+async function doGlobalSearch(q){
+  const resultsEl = document.getElementById('global-search-results');
+  resultsEl.style.display = 'block';
+  resultsEl.innerHTML = '<div class="gsearch-no-results">Поиск...</div>';
+
+  const ql = q.toLowerCase().replace('@','');
+  let sections = [];
+
+  try {
+    // Поиск пользователей
+    const allUsers = await fbGet('users') || {};
+    const matchUsers = Object.values(allUsers).filter(u=>
+      u.username !== me.username &&
+      (u.username.toLowerCase().includes(ql) || (u.name||'').toLowerCase().includes(ql))
+    ).slice(0,5);
+
+    if(matchUsers.length){
+      sections.push(`<div class="gsearch-section-title">👤 Пользователи</div>`);
+      matchUsers.forEach(u=>{
+        sections.push(`<div class="gsearch-item" onclick="startChatWithUser('${u.username}');clearGlobalSearch()">
+          <div class="gsearch-item-av ${u.avColor||'av-a'}">${getInitial(u.name)}</div>
+          <div class="gsearch-item-info">
+            <div class="gsearch-item-name">${escHtml(u.name)}</div>
+            <div class="gsearch-item-sub">@${u.username}</div>
+          </div>
+        </div>`);
+      });
+    }
+
+    // Поиск публичных групп и каналов через userChats всех пользователей
+    // Ищем в chats по publicLink или name
+    const allUserChats = await fbGet('userChats') || {};
+    const publicChats = {};
+    Object.values(allUserChats).forEach(userChatsObj=>{
+      Object.values(userChatsObj||{}).forEach(chat=>{
+        if((chat.type==='group'||chat.type==='channel') && chat.privacy==='public' && chat.id){
+          if(!publicChats[chat.id]) publicChats[chat.id] = chat;
+        }
+      });
+    });
+
+    const matchChats = Object.values(publicChats).filter(c=>
+      (c.name||'').toLowerCase().includes(ql) ||
+      (c.publicLink||'').toLowerCase().includes(ql) ||
+      (c.description||'').toLowerCase().includes(ql)
+    ).slice(0,5);
+
+    if(matchChats.length){
+      const groups = matchChats.filter(c=>c.type==='group');
+      const channels = matchChats.filter(c=>c.type==='channel');
+      if(groups.length){
+        sections.push(`<div class="gsearch-section-title">👥 Группы</div>`);
+        groups.forEach(c=>{
+          sections.push(`<div class="gsearch-item" onclick="joinOrOpenPublicChat(${JSON.stringify(c).replace(/"/g,'&quot;')});clearGlobalSearch()">
+            <div class="gsearch-item-av ${c.avClass||'av-b'}">👥</div>
+            <div class="gsearch-item-info">
+              <div class="gsearch-item-name">${escHtml(c.name)}</div>
+              <div class="gsearch-item-sub">${c.publicLink?'kvit.app/'+c.publicLink:'Публичная группа'}</div>
+            </div>
+          </div>`);
+        });
+      }
+      if(channels.length){
+        sections.push(`<div class="gsearch-section-title">📢 Каналы</div>`);
+        channels.forEach(c=>{
+          sections.push(`<div class="gsearch-item" onclick="joinOrOpenPublicChat(${JSON.stringify(c).replace(/"/g,'&quot;')});clearGlobalSearch()">
+            <div class="gsearch-item-av ${c.avClass||'av-b'}">📢</div>
+            <div class="gsearch-item-info">
+              <div class="gsearch-item-name">${escHtml(c.name)}</div>
+              <div class="gsearch-item-sub">${c.publicLink?'kvit.app/'+c.publicLink:'Публичный канал'}</div>
+            </div>
+          </div>`);
+        });
+      }
+    }
+
+    if(!sections.length){
+      resultsEl.innerHTML = '<div class="gsearch-no-results">Ничего не найдено</div>';
+    } else {
+      resultsEl.innerHTML = sections.join('');
+    }
+  } catch(e){
+    resultsEl.innerHTML = '<div class="gsearch-no-results">Ошибка поиска</div>';
+  }
+}
+
+function clearGlobalSearch(){
+  document.getElementById('search-input').value='';
+  document.getElementById('global-search-results').style.display='none';
+  renderChatList('');
+}
+
+async function joinOrOpenPublicChat(chat){
+  // Проверяем, есть ли уже в моих чатах
+  const existing = myChats.find(c=>c.id===chat.id);
+  if(existing){ openChat(chat.id); return; }
+  // Добавляем себя в чат
+  await fbSet('userChats/'+me.username+'/'+chat.id, chat);
+  myChats.push(chat);
+  fbListen('chats/'+chat.id+'/lastMsg', val=>{
+    const c=myChats.find(x=>x.id===chat.id);
+    if(c){ c.lastMsg=val; renderChatList(); }
+  });
+  renderChatList();
+  openChat(chat.id);
+  showToast(`Вы вошли в "${chat.name}"`, chat.type==='channel'?'📢':'👥');
+}
 
 function renderChatList(filter=''){
   const root = document.getElementById('chat-list-root');
@@ -2117,9 +2265,14 @@ function quickLogin(username){
 
 // Переключение аккаунтов
 function openAccountSwitcher(){
-  const saved=LS.get('kvit_saved_users')||[];
+  let saved = LS.get('kvit_saved_users') || [];
+  // Убедимся, что текущий аккаунт всегда есть в списке
+  if(!saved.find(u=>u.username===me.username)){
+    saved.unshift({username:me.username, name:me.name, avColor:me.avColor});
+    LS.set('kvit_saved_users', saved);
+  }
   const list=document.getElementById('account-list');
-  list.innerHTML=(saved.length?saved:[{username:me.username,name:me.name,avColor:me.avColor}]).map(u=>`
+  list.innerHTML=saved.map(u=>`
     <div class="account-item${u.username===me.username?' current':''}" onclick="switchAccountTo('${u.username}')">
       <div class="account-item-av ${u.avColor||'av-a'}">${getInitial(u.name)}</div>
       <div class="account-item-info"><div class="account-item-name">${escHtml(u.name)}</div><div class="account-item-tag">@${u.username}</div></div>
@@ -2242,7 +2395,7 @@ Object.assign(window, {
   openModal, closeModal, openMyProfileModal, openSettingsModal, saveSettings,
   openChangePassword, doChangePassword, copyProfileLink,
   openAccountSwitcher, switchAccountTo, quickLogin,
-  setTheme, filterChats, buildEmojiPicker,
+  setTheme, filterChats, handleSearchInput, clearGlobalSearch, joinOrOpenPublicChat, buildEmojiPicker,
 });
 </script>
 </body>
